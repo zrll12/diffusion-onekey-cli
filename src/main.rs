@@ -81,7 +81,7 @@ fn main() {
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     let result = rt.spawn(check_docker());
-    if rt.block_on(result).unwrap() {
+    if !rt.block_on(result).unwrap() {
         //install docker
         install_docker(&distribution);
         println!("Docker installed, reboot to continue.");
