@@ -14,6 +14,7 @@ Thanks to https://github.com/k7212519/stable-diffusion-webui-AMD-onekey-deploy f
  - [ ] RHEL 9.1
  - [ ] SUSE 15 SP4
 
+Please note that only amd64 CPUs are supported.<br>
 More platform support will be added once amd release its driver.
 
 ## GPU supported

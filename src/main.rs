@@ -1,22 +1,22 @@
-use std::{env, fs, io, result};
-use std::fs::File;
+mod docker;
+mod download;
+
+use std::{fs, io};
 use std::io::{BufRead, Read, Write};
-use std::num::{NonZeroU8, NonZeroUsize};
-use std::path::{Path, PathBuf};
+use std::path::{Path};
 use std::process::{Command, exit, Stdio};
-use std::time::Duration;
-use downloader::Downloader;
-use tokio::main;
-use crate::Distribution::{UBUNTU_2004, UBUNTU_2204};
+use crate::Distribution::{Ubuntu2004, Ubuntu2204};
+use crate::docker::{check_docker, install_docker};
+use crate::download::install;
 
 #[derive(Debug)]
-enum Distribution {
-    UBUNTU_2004,
-    UBUNTU_2204,
+pub enum Distribution {
+    Ubuntu2004,
+    Ubuntu2204,
 }
 
 fn main() {
-    sudo::with_env(&["HOME"]).expect("sudo failed");
+    sudo::with_env(&["HOME", "USER"]).expect("sudo failed");
     println!("Collecting system info...");
     //check if version compatible
     let linux_version = match check_distribute_version() {
@@ -30,10 +30,10 @@ fn main() {
         "Ub" => {
             match linux_version[7..14].to_string().as_str() {
                 "22.04.2" => {
-                    UBUNTU_2204
+                    Ubuntu2204
                 }
                 "20.04.5" => {
-                    UBUNTU_2004
+                    Ubuntu2004
                 }
                 a => {
                     panic!("Unknown or unsupported distribution version: {}", a);
@@ -47,39 +47,16 @@ fn main() {
     println!("Your distribution is: {:?}", distribution);
 
     //check is driver installed
-    if let Err(e) = Command::new("rocm-smi").output() {
-        //download
-        if !Path::new(get_file_name(&distribution).as_str()).exists() {
-            println!("It seems you have not install the drivers yet, downloading...");
-            println!("If you believe this is a mistake, please provide these to admin:\n{}", e.to_string());
-            download_driver(&distribution, 0);
-        }
-        //examine md5
-        //calculate md5 for file
-        let mut f = File::open(get_file_name(&distribution)).unwrap();
-        let mut buffer = Vec::new();
-        // read the whole file
-        f.read_to_end(&mut buffer).unwrap();
-
-        let mut digest = md5::compute(buffer);
-        let mut times = 0;
-        while format!("{:x}", digest) != "493c00c81e8dc166b3abde1bf1d04cda" { // file error, try again
-            fs::remove_file(get_file_name(&distribution)).expect("Cannot remove file.");
-            times = download_driver(&distribution, times);
-        }
-        println!("Download complete, installing...");
-        // println!("If you believe this is a mistake, please provide these to admin:\n{}", e.to_string());
-
-        //setup
-        println!("Installing the installer...");
-        let result = run_command(Command::new("dpkg").arg("-i").arg(get_file_name(&distribution)));
-        match result {
-            Ok(_) => {}
-            Err(err) => {
-                println!("It looks like we have met an error. If you need any help, please provide these to admin:\n{}", err);
-                panic!("Cannot install driver");
-            }
-        }
+    if let Err(_) = Command::new("rocm-smi").output() {
+        let url = match distribution {
+            Ubuntu2004 => { "https://repo.radeon.com/amdgpu-install/22.40.3/ubuntu/focal/amdgpu-install_5.4.50403-1_all.deb" }
+            Ubuntu2204 => { "https://repo.radeon.com/amdgpu-install/22.40.3/ubuntu/jammy/amdgpu-install_5.4.50403-1_all.deb" }
+        };
+        let md5 = match distribution {
+            Ubuntu2004 => { "9f59f90b8e9cdd502892b1d052e909b1" }
+            Ubuntu2204 => { "493c00c81e8dc166b3abde1bf1d04cda" }
+        };
+        install(url,"installer", md5, "amdgpu-install_5.4.50403-1_all.deb");
 
         println!("Installer ready, installing...");
         let result = run_command(Command::new("amdgpu-install").arg("--usecase=rocm,hip,graphics").arg("--opencl=rocr"));
@@ -92,81 +69,21 @@ fn main() {
         }
 
         println!("Driver installed, cleaning up...");
-        fs::remove_file(get_file_name(&distribution)).expect("Cannot remove file.");
+        fs::remove_file("amdgpu-install_5.4.50403-1_all.deb").expect("Cannot remove file.");
 
         println!("Please reboot to continue installing.");
         pause();
         exit(0);
     };
 
-    //check is driver installed
+    //check is docker installed
     println!("Driver checked, preparing docker now...");
-    if let Err(e) = Command::new("docker").output() {
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let result = rt.spawn(check_docker());
+    if rt.block_on(result).unwrap() {
         //install docker
-        // let architecture = String::from_utf8(Command::new("dpkg").arg("--print-architecture").output().unwrap().stdout).unwrap();
-        if Path::new("docker.sh").exists() {
-            println!("shell file exists, deleting...");
-            fs::remove_file("docker.sh").expect("Cannot remove file.");
-        }
-
-        //TODO: change to rust code
-        let shell_script = r#"#!/bin/bash
-
-usermod -a -G render $LOGNAME
-usermod -a -G video $LOGNAME
-
-apt-get update
-
-# Update the apt package index and install packages to allow apt to use a repository over HTTPS:
-apt-get install \
-    ca-certificates \
-    curl \
-    gnupg \
-    lsb-release
-
-# Add Docker’s official GPG key:
-mkdir -m 0755 -p /etc/apt/keyrings
-curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-
-# Use the following command to set up the repository:
-echo \
-  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
-  $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
-
-sudo apt-get update
-
-#Your default umask may be incorrectly configured, preventing detection of the repository public key file. Try granting read permission for the Docker public key file before updating the package index:
-chmod a+r /etc/apt/keyrings/docker.gpg
-apt-get update
-
-# To install the latest version, run:
-apt-get install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-docker version
-echo "docker installed"
-
-#add user/docker to group
-groupadd docker
-echo "user add groupaad"
-gpasswd -a $USER docker
-echo "gpasswd"
-newgrp docker"#;
-        use std::fs::OpenOptions;
-        let mut file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .open("docker.sh").unwrap();
-        file.write_all(shell_script.as_bytes()).expect("Cannot write file.");
-
-        let result = run_command(Command::new("sh").arg("docker.sh"));
-        match result {
-            Ok(_) => {}
-            Err(err) => {
-                println!("It looks like we have met an error. If you need any help, please provide these to admin:\n{}", err);
-                panic!("Cannot install docker");
-            }
-        }
-
+        install_docker(&distribution);
         println!("Docker installed, reboot to continue.");
         pause();
         exit(0);
@@ -303,46 +220,7 @@ fn check_distribute_version() -> Result<String, String> {
     Ok(system)
 }
 
-fn get_file_name(distribution: &Distribution) -> String {
-    match distribution {
-        UBUNTU_2004 => { "amdgpu-install_5.4.50403-1_all.deb".to_string() }
-        UBUNTU_2204 => { "amdgpu-install_5.4.50403-1_all.deb".to_string() }
-    }
-}
-
-fn download_driver(distribution: &Distribution, times: i32) -> i32 {
-    let url = match distribution {
-        UBUNTU_2004 => { "https://repo.radeon.com/amdgpu-install/22.40.3/ubuntu/focal/amdgpu-install_5.4.50403-1_all.deb" }
-        UBUNTU_2204 => { "https://repo.radeon.com/amdgpu-install/22.40.3/ubuntu/jammy/amdgpu-install_5.4.50403-1_all.deb" }
-    };
-
-    if times >= 3 {//too many times
-        println!("We have tried for at least 3 times, but unable to download the right file. Please download with this link and copy them to this directory: {}", url);
-        panic!("Downloaded file error");
-    }
-
-    let mut downloader = Downloader::builder()
-        .download_folder(std::path::Path::new("./"))
-        .parallel_requests(1)
-        .build()
-        .unwrap();
-
-    let dl = downloader::Download::new(url);
-    let dl = dl.progress(SimpleReporter::create());
-
-    let result = downloader.download(&[dl]).unwrap();
-    match result.get(0).unwrap() {
-        Err(e) => {
-            println!("Download failed. If you need any help, please provide these to admin:\n{}", e.to_string());
-            panic!("Download failed.");
-        },
-        Ok(_) => {},
-    };
-
-    times + 1
-}
-
-fn run_command(command: &mut Command) -> Result<(), String> {
+pub fn run_command(command: &mut Command) -> Result<(), String> {
     let mut child = command.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
     let out = child.stdout.take().unwrap();
     let mut out = std::io::BufReader::new(out);
@@ -366,12 +244,12 @@ fn run_command(command: &mut Command) -> Result<(), String> {
 
 
 // Define a custom progress reporter:
-struct SimpleReporterPrivate {
+pub struct SimpleReporterPrivate {
     last_update: std::time::Instant,
     max_progress: Option<u64>,
     message: String,
 }
-struct SimpleReporter {
+pub struct SimpleReporter {
     private: std::sync::Mutex<Option<SimpleReporterPrivate>>,
 }
 
