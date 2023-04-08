@@ -11,3 +11,5 @@ md5 = "0.7.0"
 sudo = "0.6.0"
 tokio = { version = "1.27.0", features = ["rt", "macros", "rt-multi-thread"] }
 bollard = "0.14.0"
+termion = "2.0.1"
+futures-util = "0.3.28"

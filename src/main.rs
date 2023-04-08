@@ -1,13 +1,21 @@
 mod docker;
 mod download;
+mod desktop;
+mod gpu;
 
 use std::{fs, io};
+use std::fs::OpenOptions;
 use std::io::{BufRead, Read, Write};
 use std::path::{Path};
 use std::process::{Command, exit, Stdio};
+use bollard::container::StartContainerOptions;
+use bollard::Docker;
+use crate::desktop::{check_desktop, terminal_prefix};
 use crate::Distribution::{Ubuntu2004, Ubuntu2204};
-use crate::docker::{check_docker, install_docker};
+use crate::docker::{check_docker, check_image, install_docker};
 use crate::download::install;
+use crate::gpu::Args::Unknown;
+use crate::gpu::{get_arg_string, get_args, get_args_ask};
 
 #[derive(Debug)]
 pub enum Distribution {
@@ -56,7 +64,7 @@ fn main() {
             Ubuntu2004 => { "9f59f90b8e9cdd502892b1d052e909b1" }
             Ubuntu2204 => { "493c00c81e8dc166b3abde1bf1d04cda" }
         };
-        install(url,"installer", md5, "amdgpu-install_5.4.50403-1_all.deb");
+        install(url, "installer", md5, "amdgpu-install_5.4.50403-1_all.deb");
 
         println!("Installer ready, installing...");
         let result = run_command(Command::new("amdgpu-install").arg("--usecase=rocm,hip,graphics").arg("--opencl=rocr"));
@@ -90,112 +98,81 @@ fn main() {
     }
 
     //pull sd
-
-    if Path::new("sd.sh").exists() {
-        println!("shell file exists, deleting...");
-        fs::remove_file("docker.sh").expect("Cannot remove file.");
-    }
-
-    //TODO: change to rust code
-    let sd_script = r#"#!/bin/bash
-
-
-rocm-smi
-
-while true; do
-  read -p "请确认在上方能看到您的显卡信息，y确认，N退出？[y/n] " yn
-  case $yn in
-    [Yy]* ) break;;
-    [Nn]* ) exit;;
-    * ) echo "请输入 y 或 n.";;
-  esac
-done
-
-#Pull the latest k7212519/stable-diffusion-webui Docker image, start the image and attach to the container
-gnome-terminal -- docker run -it --network=host --device=/dev/kfd --device=/dev/dri --group-add=video --ipc=host --cap-add=SYS_PTRACE --security-opt seccomp=unconfined --name=stable-diffusion -v $HOME/dockerx:/dockerx k7212519/stable-diffusion-webui
-
-# 等待容器启动
-until [ "$(docker inspect -f '{{.State.Status}}' stable-diffusion)" = "running" ]; do
-    sleep 10
-done
-
-echo "docker is running..."
-
-echo "正在释放文件，请稍等......"
-# copy sd files from /sd_backup to /dockerx/
-docker exec -it stable-diffusion bash -c "cp -a /sd_backup/. /dockerx/ && exit"
-
-
-##########显卡型号选择##########
-
-valid_choice=false
-
-while [ "$valid_choice" == false ]
-do
-  echo "请选择您的显卡型号："
-  echo "1. RX 6800系列"
-  echo "2. RX 6700系列"
-  echo "3. RX 6600系列"
-  echo "4. RX 5000系列"
-  echo "5. RX Vega系列"
-
-  read -p "请输入选项编号： " choice
-
-  case $choice in
-    1)
-      echo "您选择了 RX 6800"
-      sudo cp -f GPU/rx6800.sh  $HOME/dockerx/sh/sd.sh
-      valid_choice=true
-      ;;
-    2)
-      echo "您选择了 RX 6700"
-      sudo cp -f GPU/rx6700.sh  $HOME/dockerx/sh/sd.sh
-      valid_choice=true
-      ;;
-    3)
-      echo "您选择了 RX 6600"
-      sudo cp -f GPU/rx6600.sh  $HOME/dockerx/sh/sd.sh
-      valid_choice=true
-      ;;
-    4)
-      echo "您选择了 RX 5000"
-      sudo cp -f GPU/rx5000.sh  $HOME/dockerx/sh/sd.sh
-      valid_choice=true
-      ;;
-     5)
-      echo "您选择了 RX Vega"
-      sudo cp -f GPU/rx_vega.sh  $HOME/dockerx/sh/sd.sh
-      valid_choice=true
-      ;;
-    *)
-      echo "无效的选项编号，请重新输入。"
-      ;;
-  esac
-done
-# 创建目录和拷贝文件
-sudo mkdir /usr/share/stable-diffusion
-sudo cp $HOME/dockerx/sh/oneclick_start.sh /usr/share/stable-diffusion/
-sudo cp $HOME/dockerx/sh/sd.png /usr/share/icons/
-sudo cp $HOME/dockerx/sh/stable-diffusion.desktop $HOME/.local/share/applications/
-sudo chmod -R 777 $HOME/dockerx"#;
-    use std::fs::OpenOptions;
-    let mut file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .open("sd.sh").unwrap();
-    file.write_all(sd_script.as_bytes()).expect("Cannot write file.");
-
-    let result = run_command(Command::new("sh").arg("sd.sh"));
-    match result {
-        Ok(_) => {}
-        Err(err) => {
-            println!("It looks like we have met an error. If you need any help, please provide these to admin:\n{}", err);
-            panic!("Cannot install docker");
+    let result = rt.spawn(check_image());
+    if !rt.block_on(result).unwrap() {
+        println!("Pulling images...");
+        let result = run_command(Command::new("gnome-terminal").arg("--usecase=rocm,hip,graphics").arg("--opencl=rocr"));
+        match result {
+            Ok(_) => {}
+            Err(err) => {
+                println!("It looks like we have met an error. If you need any help, please provide these to admin:\n{}", err);
+                panic!("Cannot install driver");
+            }
         }
     }
 
-    println!("Docker installed, reboot to continue.");
+    async fn start_container(name: &str) -> Result<(), String> {
+        let docker = Docker::connect_with_local_defaults().unwrap();
+        let a = docker.start_container(name, None::<StartContainerOptions<String>>).await;
+        return match a {
+            Ok(_) => {Ok(())}
+            Err(err) => {Err(err.to_string())}
+        }
+    }
+
+    let result = rt.spawn(start_container("stable-diffusion"));
+    let result = rt.block_on(result).unwrap();
+    if let Err(_) = result {
+        println!("Pulling image...");
+        let (cmd, arg) = terminal_prefix(check_desktop());
+        Command::new(cmd).arg(arg).args(["docker", "run", "-it", "--network=host", "--device=/dev/kfd", "--device=/dev/dri",
+            "--group-add=video", "--ipc=host", "--cap-add=SYS_PTRACE", "--security-opt", "seccomp=unconfined", "--name=stable-diffusion", "-v",
+            "$HOME/dockerx:/dockerx", "zrll/stable-diffusion"]).output().unwrap();
+    }
+
+
+    let result = rt.spawn(start_container("stable-diffusion"));
+    let result = rt.block_on(result).unwrap();
+    if let Err(e) = result {
+        println!("Cannot load image. If that window just flash through, please check your network");
+        panic!("Cannot load image: {}", e.to_string());
+    }
+
+    println!("Image ready. Releasing file, this could take a minute.");
+
+    let (cmd, arg) = terminal_prefix(check_desktop());
+    Command::new(cmd).arg(arg).args(["docker", "exec", "-it", "stable-diffusion", "bash", "-c",
+        "\"rsync -r -P /sd_backup /dockerx\""]).output().unwrap();
+
+    println!("Creating shortcut...");
+
+    let mut launch_arg = get_args();
+    if let Unknown = launch_arg {
+        launch_arg = get_args_ask();
+    }
+    let arg_string = get_arg_string(launch_arg);
+    let launch_string = "docker exec -it stable-diffusion bash -c \"cd /dockerx/stable-diffusion-webui && source venv/bin/activate && REQS_FILE='requirements.txt' ".to_string() + arg_string + "python launch.py\"";
+
+    let home = env!("HOME");
+    let path = home.to_string() + "/dockerx/sh/sd.sh";
+
+    if Path::new(&path).exists() {
+        fs::remove_file(&path).expect("Cannot remove file.");
+    }
+
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .open(&path).unwrap();
+    file.write_all(launch_string.as_bytes()).unwrap();
+
+    fs::create_dir("/usr/share/stable-diffusion").expect("Cannot create dir");
+    fs::copy(home.to_string() + "/dockerx/sh/oneclick_start.sh" , "/usr/share/stable-diffusion/oneclick_start.sh").unwrap();
+    fs::copy(home.to_string() + "/dockerx/sh/sd.png" , "/usr/share/icons/sd.png").unwrap();
+    fs::copy(home.to_string() + "/dockerx/sh/stable-diffusion.desktop" , home.to_string() + "/.local/share/applications/").unwrap();
+
+    println!("Install complete! If you have any problem, please contact staff.");
+
     pause();
     exit(0);
 }
@@ -209,7 +186,7 @@ fn pause() {
 
 fn check_distribute_version() -> Result<String, String> {
     let mut system: String = Default::default();
-    let mut file = match std::fs::File::open("/etc/issue.net") {
+    let mut file = match fs::File::open("/etc/issue.net") {
         Ok(f) => { f }
         Err(e) => { return Err(e.to_string()); }
     };
@@ -223,7 +200,7 @@ fn check_distribute_version() -> Result<String, String> {
 pub fn run_command(command: &mut Command) -> Result<(), String> {
     let mut child = command.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
     let out = child.stdout.take().unwrap();
-    let mut out = std::io::BufReader::new(out);
+    let mut out = io::BufReader::new(out);
     let mut s = String::new();
     while let Ok(_) = out.read_line(&mut s) {
         if let Ok(Some(_)) = child.try_wait() { //finished
@@ -232,71 +209,13 @@ pub fn run_command(command: &mut Command) -> Result<(), String> {
         println!("{}", s);
     }
     let out = child.stderr.take().unwrap();
-    let mut err_reader = std::io::BufReader::new(out);
+    let mut err_reader = io::BufReader::new(out);
     let mut err = String::new();
     err_reader.read_to_string(&mut err).unwrap();
     return if !err.is_empty() {
         Err(err)
     } else {
         Ok(())
-    }
+    };
 }
 
-
-// Define a custom progress reporter:
-pub struct SimpleReporterPrivate {
-    last_update: std::time::Instant,
-    max_progress: Option<u64>,
-    message: String,
-}
-pub struct SimpleReporter {
-    private: std::sync::Mutex<Option<SimpleReporterPrivate>>,
-}
-
-impl SimpleReporter {
-    #[cfg(not(feature = "tui"))]
-    fn create() -> std::sync::Arc<Self> {
-        std::sync::Arc::new(Self {
-            private: std::sync::Mutex::new(None),
-        })
-    }
-}
-
-impl downloader::progress::Reporter for SimpleReporter {
-    fn setup(&self, max_progress: Option<u64>, message: &str) {
-        let private = SimpleReporterPrivate {
-            last_update: std::time::Instant::now(),
-            max_progress,
-            message: message.to_owned(),
-        };
-
-        let mut guard = self.private.lock().unwrap();
-        *guard = Some(private);
-    }
-
-    fn progress(&self, current: u64) {
-        if let Some(p) = self.private.lock().unwrap().as_mut() {
-            let max_bytes = match p.max_progress {
-                Some(bytes) => format!("{:?}", bytes),
-                None => "{unknown}".to_owned(),
-            };
-            if p.last_update.elapsed().as_millis() >= 1000 {
-                println!(
-                    "tdownloader: {} of {} bytes. [{}]",
-                    current, max_bytes, p.message
-                );
-                p.last_update = std::time::Instant::now();
-            }
-        }
-    }
-
-    fn set_message(&self, message: &str) {
-        println!("downloader: Message changed to: {}", message);
-    }
-
-    fn done(&self) {
-        let mut guard = self.private.lock().unwrap();
-        *guard = None;
-        println!("downloader: [DONE]");
-    }
-}

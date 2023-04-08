@@ -4,7 +4,7 @@ use std::io::Read;
 use std::path::Path;
 use std::process::Command;
 use downloader::Downloader;
-use crate::{run_command, SimpleReporter};
+use crate::{run_command};
 
 pub fn install(url: &str, describe: &str, md5: &str, file_name: &str) {
     //download
@@ -41,6 +41,9 @@ pub fn install(url: &str, describe: &str, md5: &str, file_name: &str) {
     }
 }
 
+#[deprecated(
+note = "Please use install instead."
+)]
 pub fn install_no_check(url: &str, describe: &str, file_name: &str) {
     //download
     if Path::new(url).exists() {
@@ -67,7 +70,7 @@ fn download_file(url: &str, times: i32) -> i32 {
     }
 
     let mut downloader = Downloader::builder()
-        .download_folder(std::path::Path::new("./"))
+        .download_folder(Path::new("./"))
         .parallel_requests(1)
         .build()
         .unwrap();
@@ -85,4 +88,64 @@ fn download_file(url: &str, times: i32) -> i32 {
     };
 
     times + 1
+}
+
+
+// Define a custom progress reporter:
+pub struct SimpleReporterPrivate {
+    last_update: std::time::Instant,
+    max_progress: Option<u64>,
+    message: String,
+}
+
+pub struct SimpleReporter {
+    private: std::sync::Mutex<Option<SimpleReporterPrivate>>,
+}
+
+impl SimpleReporter {
+    #[cfg(not(feature = "tui"))]
+    fn create() -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self {
+            private: std::sync::Mutex::new(None),
+        })
+    }
+}
+
+impl downloader::progress::Reporter for SimpleReporter {
+    fn setup(&self, max_progress: Option<u64>, message: &str) {
+        let private = SimpleReporterPrivate {
+            last_update: std::time::Instant::now(),
+            max_progress,
+            message: message.to_owned(),
+        };
+
+        let mut guard = self.private.lock().unwrap();
+        *guard = Some(private);
+    }
+
+    fn progress(&self, current: u64) {
+        if let Some(p) = self.private.lock().unwrap().as_mut() {
+            let max_bytes = match p.max_progress {
+                Some(bytes) => format!("{:?}", bytes),
+                None => "{unknown}".to_owned(),
+            };
+            if p.last_update.elapsed().as_millis() >= 1000 {
+                println!(
+                    "tdownloader: {} of {} bytes. [{}]",
+                    current, max_bytes, p.message
+                );
+                p.last_update = std::time::Instant::now();
+            }
+        }
+    }
+
+    fn set_message(&self, message: &str) {
+        println!("downloader: Message changed to: {}", message);
+    }
+
+    fn done(&self) {
+        let mut guard = self.private.lock().unwrap();
+        *guard = None;
+        println!("downloader: [DONE]");
+    }
 }
