@@ -183,7 +183,7 @@ dependencies = [
 
 [[package]]
 name = "diffusion-onekey-cli"
-version = "0.1.0"
+version = "23.4.8"
 dependencies = [
  "bollard",
  "downloader",
