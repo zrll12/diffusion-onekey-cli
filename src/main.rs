@@ -6,6 +6,7 @@ mod gpu;
 use std::{fs, io};
 use std::fs::OpenOptions;
 use std::io::{BufRead, Read, Write};
+use std::io::ErrorKind::AlreadyExists;
 use std::path::{Path};
 use std::process::{Command, exit, Stdio};
 use bollard::container::StartContainerOptions;
@@ -100,15 +101,11 @@ fn main() {
     //pull sd
     let result = rt.spawn(check_image());
     if !rt.block_on(result).unwrap() {
-        println!("Pulling images...");
-        let result = run_command(Command::new("gnome-terminal").arg("--usecase=rocm,hip,graphics").arg("--opencl=rocr"));
-        match result {
-            Ok(_) => {}
-            Err(err) => {
-                println!("It looks like we have met an error. If you need any help, please provide these to admin:\n{}", err);
-                panic!("Cannot install driver");
-            }
-        }
+        println!("Pulling image...");
+        let (cmd, arg) = terminal_prefix(check_desktop());
+        Command::new(cmd).arg(arg).args(["docker", "run", "-it", "--network=host", "--device=/dev/kfd", "--device=/dev/dri",
+            "--group-add=video", "--ipc=host", "--cap-add=SYS_PTRACE", "--security-opt", "seccomp=unconfined", "--name=stable-diffusion", "-v",
+            "$HOME/dockerx:/dockerx", "zrll/stable-diffusion"]).output().unwrap();
     }
 
     async fn start_container(name: &str) -> Result<(), String> {
@@ -166,10 +163,17 @@ fn main() {
         .open(&path).unwrap();
     file.write_all(launch_string.as_bytes()).unwrap();
 
-    fs::create_dir("/usr/share/stable-diffusion").expect("Cannot create dir");
+    match fs::create_dir("/usr/share/stable-diffusion") {
+        Ok(_) => {}
+        Err(e) => {
+            if let AlreadyExists = e.kind() {} else {
+                panic!("Cannot create dir: {}", e.to_string());
+            }
+        }
+    };
     fs::copy(home.to_string() + "/dockerx/sh/oneclick_start.sh" , "/usr/share/stable-diffusion/oneclick_start.sh").unwrap();
     fs::copy(home.to_string() + "/dockerx/sh/sd.png" , "/usr/share/icons/sd.png").unwrap();
-    fs::copy(home.to_string() + "/dockerx/sh/stable-diffusion.desktop" , home.to_string() + "/.local/share/applications/").unwrap();
+    fs::copy(home.to_string() + "/dockerx/sh/stable-diffusion.desktop" , home.to_string() + "/.local/share/applications/stable-diffusion.desktop").unwrap();
 
     println!("Install complete! If you have any problem, please contact staff.");
 
