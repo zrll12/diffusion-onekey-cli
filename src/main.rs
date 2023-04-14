@@ -114,7 +114,7 @@ fn main() {
         let (cmd, arg) = terminal_prefix(check_desktop());
         Command::new(cmd).args(arg).args(["docker", "run", "-it", "--network=host", "--device=/dev/kfd", "--device=/dev/dri",
             "--group-add=video", "--ipc=host", "--cap-add=SYS_PTRACE", "--security-opt", "seccomp=unconfined", "--name=stable-diffusion", "-v",
-            "$HOME/dockerx:/dockerx", "zrll/stable-diffution"]).output().unwrap();//There is a typo with its name in docker hub. Will be fixed in the future.
+            "$HOME/dockerx:/dockerx", "zrll/stable-diffution", "&&", "exit"]).output().unwrap();//There is a typo with its name in docker hub. Will be fixed in the future.
 
         let result = rt.spawn(start_container("stable-diffusion"));
         let result = rt.block_on(result).unwrap();
@@ -172,8 +172,14 @@ fn main() {
     file.write_all(launch_string.as_bytes()).unwrap();
 
     //change owner
-    run_command(Command::new("chown").args([env!("USER"), "-R", &(home.to_string() + "/dockerx")])).expect("Cannot change owner");
+    run_command(Command::new("chown").args([env!("USER"), "-R", &(home.to_string() + "/dockerx/sh")])).expect("Cannot change owner");
     run_command(Command::new("chmod").args(["+x", &path])).expect("Cannot change owner");
+    //set save directory as we had changed the ownership
+    run_command(Command::new("docker").args(["exec", "-it", "stable-diffusion", "git", "config", "--global", "--add", "safe.directory", "/dockerx/stable-diffusion-webui/repositories/CodeFormer"])).expect("Cannot set save directory");
+    run_command(Command::new("docker").args(["exec", "-it", "stable-diffusion", "git", "config", "--global", "--add", "safe.directory", "/dockerx/stable-diffusion-webui/repositories/BLIP"])).expect("Cannot set save directory");
+    run_command(Command::new("docker").args(["exec", "-it", "stable-diffusion", "git", "config", "--global", "--add", "safe.directory", "/dockerx/stable-diffusion-webui/repositories/k-diffusion"])).expect("Cannot set save directory");
+    run_command(Command::new("docker").args(["exec", "-it", "stable-diffusion", "git", "config", "--global", "--add", "safe.directory", "/dockerx/stable-diffusion-webui/repositories/stable-diffusion-stability-ai"])).expect("Cannot set save directory");
+    run_command(Command::new("docker").args(["exec", "-it", "stable-diffusion", "git", "config", "--global", "--add", "safe.directory", "/dockerx/stable-diffusion-webui/repositories/taming-transformers"])).expect("Cannot set save directory");
 
     match fs::create_dir("/usr/share/stable-diffusion") {
         Ok(_) => {}
@@ -225,16 +231,16 @@ pub fn run_command(command: &mut Command) -> Result<(), String> {
         if let Ok(Some(_)) = child.try_wait() { //finished
             break;
         }
-        println!("{}", s);
+        if !s.is_empty() {
+            println!("{}", s);
+        }
     }
-    let out = child.stderr.take().unwrap();
-    let mut err_reader = io::BufReader::new(out);
-    let mut err = String::new();
-    err_reader.read_to_string(&mut err).unwrap();
-    return if !err.is_empty() {
-        Err(err)
-    } else {
+
+    let out = child.wait_with_output().unwrap();
+    return if out.status.success() {
         Ok(())
-    };
+    } else {
+        Err(String::from_utf8(out.stderr).unwrap())
+    }
 }
 
