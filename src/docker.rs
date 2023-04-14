@@ -6,10 +6,7 @@ use crate::{Distribution, run_command};
 use crate::download::install;
 
 pub async fn check_docker() -> bool {
-    return match Docker::connect_with_local_defaults() {
-        Ok(_) => true,
-        Err(_) => false,
-    }
+    run_command(Command::new("docker").arg("images")).is_ok()
 }
 
 pub async fn check_image() -> bool {
@@ -25,7 +22,7 @@ pub async fn check_image() -> bool {
     })).await.unwrap();
 
     for image in images {
-        if image.repo_tags[0] == "k7212519/stable-diffusion-webui:latest" {
+        if image.repo_tags[0] == "zrll/stable-diffution:latest" {//There is a typo with its name in docker hub. Will be fixed in the future.
             flag = true;
         }
     }
@@ -46,21 +43,6 @@ pub fn install_docker(distribution: &Distribution) {
 
 
     let url = match distribution {
-        Distribution::Ubuntu2004 => { "https://download.docker.com/linux/ubuntu/dists/focal/pool/stable/amd64/docker-ce_23.0.3-1~ubuntu.20.04~focal_amd64.deb" }
-        Distribution::Ubuntu2204 => { "https://download.docker.com/linux/ubuntu/dists/jammy/pool/stable/amd64/docker-ce_23.0.3-1~ubuntu.22.04~jammy_amd64.deb" }
-    };
-    let md5 = match distribution {
-        Distribution::Ubuntu2004 => { "77e525d158f15e92bd2192bb0462e2cb" }
-        Distribution::Ubuntu2204 => { "9e171fc3faa2c7a881a5831406d4ad80" }
-    };
-    let file_name = match distribution {
-        Distribution::Ubuntu2004 => { "docker-ce_23.0.3-1~ubuntu.20.04~focal_amd64.deb" }
-        Distribution::Ubuntu2204 => { "docker-ce_23.0.3-1~ubuntu.22.04~jammy_amd64.deb" }
-    };
-    install(url, "docker-ce", md5, file_name);
-
-
-    let url = match distribution {
         Distribution::Ubuntu2004 => { "https://download.docker.com/linux/ubuntu/dists/focal/pool/stable/amd64/docker-ce-cli_23.0.3-1~ubuntu.20.04~focal_amd64.deb" }
         Distribution::Ubuntu2204 => { "https://download.docker.com/linux/ubuntu/dists/jammy/pool/stable/amd64/docker-ce-cli_23.0.3-1~ubuntu.22.04~jammy_amd64.deb" }
     };
@@ -73,6 +55,21 @@ pub fn install_docker(distribution: &Distribution) {
         Distribution::Ubuntu2204 => { "docker-ce-cli_23.0.3-1~ubuntu.22.04~jammy_amd64.deb" }
     };
     install(url, "docker-ce-cli", md5, file_name);
+
+
+    let url = match distribution {
+        Distribution::Ubuntu2004 => { "https://download.docker.com/linux/ubuntu/dists/focal/pool/stable/amd64/docker-ce_23.0.3-1~ubuntu.20.04~focal_amd64.deb" }
+        Distribution::Ubuntu2204 => { "https://download.docker.com/linux/ubuntu/dists/jammy/pool/stable/amd64/docker-ce_23.0.3-1~ubuntu.22.04~jammy_amd64.deb" }
+    };
+    let md5 = match distribution {
+        Distribution::Ubuntu2004 => { "77e525d158f15e92bd2192bb0462e2cb" }
+        Distribution::Ubuntu2204 => { "9e171fc3faa2c7a881a5831406d4ad80" }
+    };
+    let file_name = match distribution {
+        Distribution::Ubuntu2004 => { "docker-ce_23.0.3-1~ubuntu.20.04~focal_amd64.deb" }
+        Distribution::Ubuntu2204 => { "docker-ce_23.0.3-1~ubuntu.22.04~jammy_amd64.deb" }
+    };
+    install(url, "docker-ce", md5, file_name);
 
 
     let url = match distribution {
@@ -107,4 +104,5 @@ pub fn install_docker(distribution: &Distribution) {
     //add to user group
     run_command(Command::new("groupadd").arg("docker").arg("-f")).expect("Cannot run groupadd");
     run_command(Command::new("gpasswd").arg("-a").arg(env::var("USER").expect("Cannot get $USER")).arg("docker")).expect("Cannot run gpasswd");
+    run_command(Command::new("newgrp").arg("docker")).expect("Cannot run newgrp.");
 }

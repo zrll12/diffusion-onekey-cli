@@ -23,10 +23,10 @@ pub enum Desktop {
     Others,
 }
 
-pub fn terminal_prefix<'a>(desktop: Desktop) -> (&'a str, &'a str) {
+pub fn terminal_prefix(desktop: Desktop) -> (&'static str, Vec<&'static str>) {
     match desktop {
-        Desktop::Gnome => {("gnome-terminal","--")}
-        Desktop::KDE => {("konsole","--")}
-        Desktop::Others => {("bash","-c")}
+        Desktop::Gnome => {("gnome-terminal",vec!["--wait", "--"])}
+        Desktop::KDE => {("konsole",vec!["--wait", "--"])}
+        Desktop::Others => {("bash",vec!["-c"])}
     }
 }

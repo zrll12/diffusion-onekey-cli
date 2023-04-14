@@ -3,8 +3,8 @@ mod download;
 mod desktop;
 mod gpu;
 
-use std::{fs, io};
-use std::fs::OpenOptions;
+use std::{env, fs, io};
+use std::fs::{File, OpenOptions};
 use std::io::{BufRead, Read, Write};
 use std::io::ErrorKind::AlreadyExists;
 use std::path::{Path};
@@ -68,17 +68,16 @@ fn main() {
         install(url, "installer", md5, "amdgpu-install_5.4.50403-1_all.deb");
 
         println!("Installer ready, installing...");
-        let result = run_command(Command::new("amdgpu-install").arg("--usecase=rocm,hip,graphics").arg("--opencl=rocr"));
+        
+        let (cmd, arg) = terminal_prefix(check_desktop());
+        let result = run_command(Command::new(cmd).args(arg.clone()).arg("amdgpu-install").arg("--usecase=rocm,hip,graphics").arg("--opencl=rocr").arg("-y"));
         match result {
             Ok(_) => {}
             Err(err) => {
-                println!("It looks like we have met an error. If you need any help, please provide these to admin:\n{}", err);
+                println!("It looks like we have met an error. If you need any help, please provide these to admin:\n{}, terminal: {} {:?}", err, cmd, arg);
                 panic!("Cannot install driver");
             }
         }
-
-        println!("Driver installed, cleaning up...");
-        fs::remove_file("amdgpu-install_5.4.50403-1_all.deb").expect("Cannot remove file.");
 
         println!("Please reboot to continue installing.");
         pause();
@@ -98,15 +97,6 @@ fn main() {
         exit(0);
     }
 
-    //pull sd
-    let result = rt.spawn(check_image());
-    if !rt.block_on(result).unwrap() {
-        println!("Pulling image...");
-        let (cmd, arg) = terminal_prefix(check_desktop());
-        Command::new(cmd).arg(arg).args(["docker", "run", "-it", "--network=host", "--device=/dev/kfd", "--device=/dev/dri",
-            "--group-add=video", "--ipc=host", "--cap-add=SYS_PTRACE", "--security-opt", "seccomp=unconfined", "--name=stable-diffusion", "-v",
-            "$HOME/dockerx:/dockerx", "zrll/stable-diffusion"]).output().unwrap();
-    }
 
     async fn start_container(name: &str) -> Result<(), String> {
         let docker = Docker::connect_with_local_defaults().unwrap();
@@ -117,15 +107,41 @@ fn main() {
         }
     }
 
-    let result = rt.spawn(start_container("stable-diffusion"));
-    let result = rt.block_on(result).unwrap();
-    if let Err(_) = result {
+    //pull sd
+    let result = rt.spawn(check_image());
+    if !rt.block_on(result).unwrap() {
         println!("Pulling image...");
         let (cmd, arg) = terminal_prefix(check_desktop());
-        Command::new(cmd).arg(arg).args(["docker", "run", "-it", "--network=host", "--device=/dev/kfd", "--device=/dev/dri",
+        Command::new(cmd).args(arg).args(["docker", "run", "-it", "--network=host", "--device=/dev/kfd", "--device=/dev/dri",
             "--group-add=video", "--ipc=host", "--cap-add=SYS_PTRACE", "--security-opt", "seccomp=unconfined", "--name=stable-diffusion", "-v",
-            "$HOME/dockerx:/dockerx", "zrll/stable-diffusion"]).output().unwrap();
+            "$HOME/dockerx:/dockerx", "zrll/stable-diffution"]).output().unwrap();//There is a typo with its name in docker hub. Will be fixed in the future.
+
+        let result = rt.spawn(start_container("stable-diffusion"));
+        let result = rt.block_on(result).unwrap();
+        if let Err(e) = result {
+            println!("Cannot load image. If that window just flash through, please check your network");
+            panic!("Cannot load image: {}", e.to_string());
+        }
+
+        println!("Image ready. Releasing file, this could take a minute.");
+
+        let (cmd, arg) = terminal_prefix(check_desktop());
+        Command::new(cmd).args(arg).args(["docker", "exec", "-it", "stable-diffusion",
+            "rsync", "-a", "-P", "/sd_backup", "/dockerx"]).output().unwrap();
+        println!("Creating shortcut...");
     }
+
+
+    // let result = rt.spawn(start_container("stable-diffusion"));
+    // let result = rt.block_on(result).unwrap();
+    // if let Err(_) = result {
+    //     println!("Pulling image...");
+    //     let (cmd, arg) = terminal_prefix(check_desktop());
+    //     Command::new(cmd).args(arg).args(["docker", "run", "-it", "--network=host", "--device=/dev/kfd", "--device=/dev/dri",
+    //         "--group-add=video", "--ipc=host", "--cap-add=SYS_PTRACE", "--security-opt", "seccomp=unconfined", "--name=stable-diffusion", "-v",
+    //         &(env::var("HOME").expect("Cannot get $HOME").to_string() + "/dockerx:/dockerx"), "zrll/stable-diffution", "&&", "exit"]).output().unwrap();
+    //     //docker pull zrll/stable-diffution
+    // }
 
 
     let result = rt.spawn(start_container("stable-diffusion"));
@@ -134,14 +150,6 @@ fn main() {
         println!("Cannot load image. If that window just flash through, please check your network");
         panic!("Cannot load image: {}", e.to_string());
     }
-
-    println!("Image ready. Releasing file, this could take a minute.");
-
-    let (cmd, arg) = terminal_prefix(check_desktop());
-    Command::new(cmd).arg(arg).args(["docker", "exec", "-it", "stable-diffusion", "bash", "-c",
-        "\"rsync -r -P /sd_backup /dockerx\""]).output().unwrap();
-
-    println!("Creating shortcut...");
 
     let mut launch_arg = get_args();
     if let Unknown = launch_arg {
@@ -162,6 +170,10 @@ fn main() {
         .create(true)
         .open(&path).unwrap();
     file.write_all(launch_string.as_bytes()).unwrap();
+
+    //change owner
+    run_command(Command::new("chown").args([env!("USER"), "-R", &(home.to_string() + "/dockerx")])).expect("Cannot change owner");
+    run_command(Command::new("chmod").args(["+x", &path])).expect("Cannot change owner");
 
     match fs::create_dir("/usr/share/stable-diffusion") {
         Ok(_) => {}
@@ -190,7 +202,7 @@ fn pause() {
 
 fn check_distribute_version() -> Result<String, String> {
     let mut system: String = Default::default();
-    let mut file = match fs::File::open("/etc/issue.net") {
+    let mut file = match File::open("/etc/issue.net") {
         Ok(f) => { f }
         Err(e) => { return Err(e.to_string()); }
     };
@@ -202,7 +214,10 @@ fn check_distribute_version() -> Result<String, String> {
 }
 
 pub fn run_command(command: &mut Command) -> Result<(), String> {
-    let mut child = command.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+    let mut child = match command.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn() {
+        Ok(a) => a,
+        Err(err) => { return Err(err.to_string()) }
+    };
     let out = child.stdout.take().unwrap();
     let mut out = io::BufReader::new(out);
     let mut s = String::new();
